@@ -15,14 +15,30 @@ Download all datasets from  <https://www.kaggle.com/c/competitive-data-science-p
 ```{r}
 library(sparklyr)
 library(dplyr)
-sc <- spark_connect(master = "local")
+sc <- spark_connect(master = "local") #abrimos la conexion de spark, le decimos donde se debe ejecutar
 ```
 
 ## Parquet and buckets
 
 ```{r}
-sales_sdf <- spark_read_csv(sc, "sales", "../future_sales_data/sales_train.csv.gz")
 
+#map es una funcion que necesita un vector y una funcion. Aplicará esta función a cada uno de los elementos del vector.
+#Reduce seria una función que toma 2 elementos de ese vector y los suma.
+#pasar de c(2,3,5) a c(4,9,25) es aplicar un map al primer vector con la funcion f(x)=x², una funcion del reduce serie devolver la suma de los tres elementos.
+
+#data in paquets is usefull because we can do partitions.
+#spark is another way to query, los pasos intermedios del map reduce no se van guardando
+#spark in programatic way --> el codigo R que escribimos se traduce a lenguaje Scala que despues se compila con java virtual machine
+
+sales_sdf <- spark_read_csv(sc, "sales", "../future_sales_data/all/sales_train.csv.gz")
+item_categories_sdf <- spark_read_csv(sc, "sales", "../future_sales_data/all/sales_train.csv.gz")
+
+
+sales_sdf %>% 
+  head
+
+#añadimos las variables año y mes
+#la linea del timestamp es porque nos llega la fecha con un formato extraño de caracter
 sales_sdf %>%
   mutate(dt=to_timestamp(unix_timestamp(date, 'dd.MM.yyyy'))) %>%
   mutate(year=year(dt), month=month(dt)) %>%
@@ -31,18 +47,42 @@ sales_sdf %>%
 ```
 
 ```{r}
+#how many different shops do we have?
+sales_sdf %>% 
+  group_by(shop_id) %>% 
+  summarize %>% 
+  summarise(max(shop_id),min(shop_id),n())
+
+sales_sdf %>% 
+  summarise(max(shop_id, na.rm = TRUE),min(shop_id, na.rm = TRUE),n_distinct(shop_id))
+```
+
+
+```{r}
+
 colname <- 'shop_id'
+colname <- "item_id"
+colname <- "year"
+
 sales_sdf %>%
   group_by_(colname) %>%
   summarise %>%
   summarise(
     n(),
-    max(!!rlang::sym(colname), na.rm = TRUE),
+    max(!!rlang::sym(colname), na.rm = TRUE), #el sym lo ponemos porque nos transforma el string a variable y por eso la detecta como una variable de la bbdd
     min(!!rlang::sym(colname), na.rm = TRUE)
   ) 
+
+
+# we have 60 different shops, 3 years and 12 months
 ```
 
 ```{r}
+#what is a parquet format? is another way to store data
+#tendremos un subdirectorio de trabajo para cada id de shop, 
+#dentro de este tendremos 3 subdirectorios para cada año y dentro para cada mes
+#al final de todo tendremos el archivo de datos de tal shop id, tal año y tal mes
+
 sales_sdf %>%
   spark_write_parquet(
     "../future_sales_data/sales_train.parquet",
@@ -51,11 +91,22 @@ sales_sdf %>%
 
 
 ```{r}
-sales_sdf <- spark_read_parquet(sc, "sales", "../future_sales_data/sales_train.parquet/shop_id\\=0/year\\=2013/month\\=1/")
+#how to read the data that is in parquet?
+sales_sdf <- spark_read_parquet(sc, "sales", "../future_sales_data/all/sales_train.parquet/shop_id=0/year=2013/month=1/") # el \\ lo necesitamos para scapar
+
+#we read only the data of shop id = 0 year 2013 and month 1
+sales_sdf %>% 
+  count
+
+sales_sdf <- spark_read_parquet(sc, "sales", "../future_sales_data/all/sales_train.parquet/shop_id=0/year=2013/") #si no definimos el mes estaremos leyendo la información de todos los meses
+
+#we read only the data of shop id = 0 year 2013 and month 1
+sales_sdf %>% 
+  count
 ```
 
 ```{r}
-sales_sdf <- spark_read_parquet(sc, "sales", "../future_sales_data/sales_train.parquet/shop_id\\={0, 1}/year\\=2013/month\\=1/")
+sales_sdf <- spark_read_parquet(sc, "sales", "../future_sales_data/all/sales_train.parquet/shop_id\\={0, 1}/year\\=2013/month\\=1/")
 ```
 
 ### There is no year
@@ -78,7 +129,7 @@ library(whisker)
 
 read_sale <- function(shop_id, year, month) {
   
-  path_template = "../future_sales_data/sales_train.parquet/shop_id\\={{{shop_id}}}/year\\={{{year}}}/month\\={{{month}}}/"
+  path_template = "../future_sales_data/all/sales_train.parquet/shop_id\\={{{shop_id}}}/year\\={{{year}}}/month\\={{{month}}}/"
   data = list(
     shop_id=shop_id,
     month=month,
@@ -94,15 +145,12 @@ read_sale <- function(shop_id, year, month) {
     NULL
   }
 }
-sales_sdf <- read_sale(0, 2014, 1)
+sales_sdf <- read_sale(0, 2013, 1)
 sales_sdf
 ```
 
 
-```{r}
-sales_sdf <- read_sales(0, 2000, 1)
-sales_sdf
-```
+
 
 ```{r}
 read_sales <- function(shop_ids, years, months) {
@@ -126,10 +174,18 @@ read_sales <- function(shop_ids, years, months) {
 ```
 
 ```{r}
-sales_sdf <- read_sales(c(0, 1), 2013, 1)
+sales_sdf <- read_sales(0, 2000, 1)
+sales_sdf
+```
+
+```{r}
+sales_sdf <- read_sales(0:59, 2013, 1)
 sales_sdf %>%
   group_by(shop_id) %>%
   summarise()
+
+sales_DF<-sales_sdf %>% collect() #collect es de dplyr, lo quyenhace es pasar el df de spark a R
+
 ```
 
 ```{r}
@@ -153,6 +209,11 @@ sales_sdf %>%
 ### Problem
 Could you move this function to a separate file `salesData.R`, import it from there and use it here?
 
+```{r}
+source("../future_sales_data/salesData.R")
+```
+
+
 
 ## Project 1: Predict shop's future sales (simplified version)
 
@@ -161,10 +222,96 @@ We want predict next month total sales of a given shop.
 Steps to do:
 
 1. Data preparation
+
+```{r}
+#we can predict 2 things
+  #total sales, or total income, el numero total de items vendidos o directamente el nº de items*precio
+
+sales_sdf %>%
+  mutate(dt=to_timestamp(unix_timestamp(date, 'dd.MM.yyyy'))) %>%
+  mutate(year=year(dt), month=month(dt)) %>%
+  select(-dt) ->
+  sales_sdf
+
+#total income
+train_sales<-sales_sdf %>% 
+  group_by(shop_id,year,month) %>% 
+  summarise(total_sales=sum(item_cnt_day*item_price,na.rm = T)) %>% 
+  head
+
+#total item sold
+monthly_sdf<-sales_sdf %>% 
+  group_by(shop_id,year,month) %>% 
+  summarise(total_sales=sum(item_cnt_day,na.rm = T)) 
+```
+
+
 2. Train-test splitting
+
+```{r}
+#we want an algorithm to predict sales for the next month
+#how to split: we can split by the time, we keep the last data we have for the validation set. EX keep the last month to
+#the best thing we can do is: save the last month for validation and the other for the train
+
+#which is the last month?
+sales_sdf %>% 
+  group_by(year,month) %>% 
+  summarise %>% 
+  arrange(desc(year),desc(month))
+
+train_sdf<-monthly_sdf %>% 
+  filter(!(year==2015 & month==10)) #todos los que no son el ultimo mes
+
+train_sdf %>% count()
+
+
+test_sdf<-monthly_sdf %>% 
+  filter((year==2015 & month==10)) #nos guardamos el ultimo mes como validation
+
+
+```
+
+
 3. Training simple linear model
+
+```{r}
+#we are going to use the function from sparklyr package
+train_sdf %>% 
+ml_linear_regression(formula = total_sales~shop_id+year+month) -> M1
+
+M1
+```
+
+
 4. Evaluating: implementing MSE & R2 
 
+```{r}
+sdf_predict(test_sdf,M1)
+
+#we are going to calculate the Minimum Square Error
+train_sdf %>% 
+  sdf_predict(M1) %>% 
+  mutate(res=total_sales-prediction) %>% 
+  summarise(mean((res*res)))
+
+test_sdf %>% 
+  sdf_predict(M1) %>% 
+  mutate(res=total_sales-prediction) %>% 
+  summarise(mean((res*res)))
+
+#ml_regression_evaluator(sdf_predict(test_sdf,M1),label_col = total_sales,prediction_col = prediction)
+
+```
+
+```{r}
+
+#we are going to use as predictor the prediction of the last month. Para predecir el siguiente mes utilizamos la prediccion del mes anterior
+train_sdf %>% 
+  filter(year==2015&month==9) %>% 
+  mutate(prediction=total_sales) %>% 
+  select(-total_sales) %>% 
+  right_join(test_sdf,by=c("shop_id","year"))
+```
 
 
 
