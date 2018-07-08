@@ -31,6 +31,20 @@ sales_sdf %>%
 ```
 
 ```{r}
+sales_sdf %>%
+  group_by(shop_id)
+  summarise
+```
+
+```{r}
+colname <-"item_id"
+sales_sdf %>%
+  group_by(colname) %>%
+  summarize
+```
+
+
+```{r}
 colname <- 'shop_id'
 sales_sdf %>%
   group_by_(colname) %>%
@@ -51,11 +65,12 @@ sales_sdf %>%
 
 
 ```{r}
-sales_sdf <- spark_read_parquet(sc, "sales", "../future_sales_data/sales_train.parquet/shop_id\\=0/year\\=2013/month\\=1/")
+sales_sdf <- spark_read_parquet(sc, "sales", "../future_sales_data/sales_train.parquet/shop_id=0/year=2013/month=1/")
+sales_sdf
 ```
 
 ```{r}
-sales_sdf <- spark_read_parquet(sc, "sales", "../future_sales_data/sales_train.parquet/shop_id\\={0, 1}/year\\=2013/month\\=1/")
+sales_sdf <- spark_read_parquet(sc, "sales", "../future_sales_data/sales_train.parquet/shop_id={0, 1}/year=2013/month=1/")
 ```
 
 ### There is no year
@@ -75,29 +90,7 @@ sales_sdf %>%
 
 ```{r}
 library(whisker)
-
-read_sale <- function(shop_id, year, month) {
-  
-  path_template = "../future_sales_data/sales_train.parquet/shop_id\\={{{shop_id}}}/year\\={{{year}}}/month\\={{{month}}}/"
-  data = list(
-    shop_id=shop_id,
-    month=month,
-    year=year)
-  path <- whisker.render(path_template, data)
-  if (dir.exists(gsub("[\\]", "", path))) {
-    spark_read_parquet(sc, "sales", path) %>%
-      mutate(
-        shop_id = as.integer(shop_id),
-        year=as.integer(year),
-        month=as.integer(month))
-  } else {
-    NULL
-  }
-}
-sales_sdf <- read_sale(0, 2014, 1)
-sales_sdf
 ```
-
 
 ```{r}
 sales_sdf <- read_sales(0, 2000, 1)
@@ -105,27 +98,10 @@ sales_sdf
 ```
 
 ```{r}
-read_sales <- function(shop_ids, years, months) {
-  sdf <- NULL
-  for (shop_id in shop_ids) {
-    for (year in years) {
-        for (month in months) {
-          new_sdf <- read_sale(shop_id, year, month)
-          if (!is.null(sdf)) {
-            if (!is.null(new_sdf)) {
-              sdf <- union_all(sdf, new_sdf)
-            }
-          } else {
-            sdf <- new_sdf
-          }
-        }
-    }
-  }
-  sdf
-}
 ```
 
 ```{r}
+source("salesData.R")
 sales_sdf <- read_sales(c(0, 1), 2013, 1)
 sales_sdf %>%
   group_by(shop_id) %>%
@@ -161,11 +137,114 @@ We want predict next month total sales of a given shop.
 Steps to do:
 
 1. Data preparation
-2. Train-test splitting
-3. Training simple linear model
+2. Train-test splitting   # with the past data we want to predict future data. Test=last month
+3. Training simple linear model  # mlib spark
 4. Evaluating: implementing MSE & R2 
 
 
+1.
 
+```{r}
+sales_sdf <- spark_read_csv(sc, "sales", "../future_sales_data/sales_train.csv.gz")
+```
+
+```{r}
+sales_sdf %>%
+  head
+
+sales_sdf %>%
+  mutate(dt=to_timestamp(unix_timestamp(date, 'dd.MM.yyyy'))) %>%
+  mutate(year=year(dt), month=month(dt)) %>%
+  select(-dt) ->
+  sales_sdf
+
+monthly_sdf <-
+sales_sdf %>%
+  group_by(year, month,shop_id)%>%
+  summarise(total_items=sum(item_cnt_day,na.rm=TRUE)) 
+
+sdf_register(monthly_sdf, "sales_monthly")
+```
+
+```{r}
+library(DBI)
+dbGetQuery(
+  sc,
+"SELECT *
+,  LAG(total_items) OVER (PARTITION BY shop_id ORDER BY year, month) AS prev_total_items
+FROM sales_monthly") %>%
+  mutate(prediction=ifelse(is.nan(prev_total_items),0,prev_total_items))->
+  final_sdf
+
+final_sdf
+
+```
+
+```{r}
+monthly_sdf%>%
+  group_by(shop_id) %>%
+  mutate(prev_total_items=lag(total_items))
+```
+
+
+2.
+
+```{r}
+ sales_sdf%>%
+  group_by(year,month)%>%
+  summarise%>%
+  arrange(desc(year), desc(month))
+
+train_sdf<- final_sdf %>%
+  filter(!(year==2015 & month==10))
+
+test_sdf<- final_sdf %>%
+  filter(year==2015 & month==10)
+
+test_sdf 
+
+```
+
+```{r}
+test_sdf %>%
+  summarise(mean(total_items, na.rm=TRUE))
+
+```
+
+
+
+3.
+```{r}
+
+train_sdf%>%
+  ml_linear_regression(total_sales ~ shop_id + year + month) ->
+  model
+
+model
+```
+
+4. 
+
+```{r}
+train_sdf %>%
+  sdf_predict(model) %>%
+  mutate(res=total_sales - prediction)%>%
+  summarise(mean(res*res))   #implement mean(log(y+1)-log(y'+1))^2
+  print
+
+test_sdf %>%
+  sdf_predict(model) %>%
+  mutate(res=total_sales - prediction)%>%
+  summarise(mean(res*res))
+  print
+```
+
+```{r}
+train_sdf %>%
+  filter(year==2015 & month==9) %>%
+  mutate(prediction=total_sales)%>%
+  select(-total_sales)%>%
+  right_join(test_sdf, by=c("shop_id", "year"))
+```
 
 
