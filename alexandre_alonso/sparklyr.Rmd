@@ -1,0 +1,250 @@
+---
+title: "Files formats & Predicting Future Sales"
+output:
+  html_document: default
+  html_notebook: default
+---
+
+## Getting data
+
+Download all datasets from  <https://www.kaggle.com/c/competitive-data-science-predict-future-sales/data> into directory `future_sales_data` and uznip it.
+
+## Access to data from spark
+
+
+```{r}
+library(sparklyr)
+library(dplyr)
+sc <- spark_connect(master = "local")
+```
+
+## Parquet and buckets
+
+```{r}
+sales_sdf <- spark_read_csv(sc, "sales", "../future_sales_data/sales_train.csv.gz")
+
+sales_sdf %>%
+  mutate(dt=to_timestamp(unix_timestamp(date, 'dd.MM.yyyy'))) %>%
+  mutate(year=year(dt), month=month(dt)) %>%
+  select(-dt) ->
+  sales_sdf
+```
+
+```{r}
+sales_sdf %>%
+  group_by(shop_id)
+  summarise
+```
+
+```{r}
+colname <-"item_id"
+sales_sdf %>%
+  group_by(colname) %>%
+  summarize
+```
+
+
+```{r}
+colname <- 'shop_id'
+sales_sdf %>%
+  group_by_(colname) %>%
+  summarise %>%
+  summarise(
+    n(),
+    max(!!rlang::sym(colname), na.rm = TRUE),
+    min(!!rlang::sym(colname), na.rm = TRUE)
+  ) 
+```
+
+```{r}
+sales_sdf %>%
+  spark_write_parquet(
+    "../future_sales_data/sales_train.parquet",
+    partition_by = c("shop_id", "year", "month"))
+```
+
+
+```{r}
+sales_sdf <- spark_read_parquet(sc, "sales", "../future_sales_data/sales_train.parquet/shop_id=0/year=2013/month=1/")
+sales_sdf
+```
+
+```{r}
+sales_sdf <- spark_read_parquet(sc, "sales", "../future_sales_data/sales_train.parquet/shop_id={0, 1}/year=2013/month=1/")
+```
+
+### There is no year
+
+```{r}
+sales_sdf %>%
+ head
+```
+
+```{r}
+sales_sdf %>%
+  mutate(year=2013) %>%
+  head
+```
+
+### Function to read from multiple sources
+
+```{r}
+library(whisker)
+```
+
+```{r}
+sales_sdf <- read_sales(0, 2000, 1)
+sales_sdf
+```
+
+```{r}
+```
+
+```{r}
+source("salesData.R")
+sales_sdf <- read_sales(c(0, 1), 2013, 1)
+sales_sdf %>%
+  group_by(shop_id) %>%
+  summarise()
+```
+
+```{r}
+start_time <- Sys.time()
+sales_sdf <- read_sales(0:59, c(2013, 2014, 2015), 1:12)
+sales_sdf %>%
+  group_by(shop_id) %>%
+  summarise %>%
+  print
+end_time <- Sys.time()
+end_time - start_time
+```
+
+About 5 mins on mac...
+
+```{r}
+sales_sdf %>%
+ head
+```
+
+### Problem
+Could you move this function to a separate file `salesData.R`, import it from there and use it here?
+
+
+## Project 1: Predict shop's future sales (simplified version)
+
+We want predict next month total sales of a given shop.
+
+Steps to do:
+
+1. Data preparation
+2. Train-test splitting   # with the past data we want to predict future data. Test=last month
+3. Training simple linear model  # mlib spark
+4. Evaluating: implementing MSE & R2 
+
+
+1.
+
+```{r}
+sales_sdf <- spark_read_csv(sc, "sales", "../future_sales_data/sales_train.csv.gz")
+```
+
+```{r}
+sales_sdf %>%
+  head
+
+sales_sdf %>%
+  mutate(dt=to_timestamp(unix_timestamp(date, 'dd.MM.yyyy'))) %>%
+  mutate(year=year(dt), month=month(dt)) %>%
+  select(-dt) ->
+  sales_sdf
+
+monthly_sdf <-
+sales_sdf %>%
+  group_by(year, month,shop_id)%>%
+  summarise(total_items=sum(item_cnt_day,na.rm=TRUE)) 
+
+sdf_register(monthly_sdf, "sales_monthly")
+```
+
+```{r}
+library(DBI)
+dbGetQuery(
+  sc,
+"SELECT *
+,  LAG(total_items) OVER (PARTITION BY shop_id ORDER BY year, month) AS prev_total_items
+FROM sales_monthly") %>%
+  mutate(prediction=ifelse(is.nan(prev_total_items),0,prev_total_items))->
+  final_sdf
+
+final_sdf
+
+```
+
+```{r}
+monthly_sdf%>%
+  group_by(shop_id) %>%
+  mutate(prev_total_items=lag(total_items))
+```
+
+
+2.
+
+```{r}
+ sales_sdf%>%
+  group_by(year,month)%>%
+  summarise%>%
+  arrange(desc(year), desc(month))
+
+train_sdf<- final_sdf %>%
+  filter(!(year==2015 & month==10))
+
+test_sdf<- final_sdf %>%
+  filter(year==2015 & month==10)
+
+test_sdf 
+
+```
+
+```{r}
+test_sdf %>%
+  summarise(mean(total_items, na.rm=TRUE))
+
+```
+
+
+
+3.
+```{r}
+
+train_sdf%>%
+  ml_linear_regression(total_sales ~ shop_id + year + month) ->
+  model
+
+model
+```
+
+4. 
+
+```{r}
+train_sdf %>%
+  sdf_predict(model) %>%
+  mutate(res=total_sales - prediction)%>%
+  summarise(mean(res*res))   #implement mean(log(y+1)-log(y'+1))^2
+  print
+
+test_sdf %>%
+  sdf_predict(model) %>%
+  mutate(res=total_sales - prediction)%>%
+  summarise(mean(res*res))
+  print
+```
+
+```{r}
+train_sdf %>%
+  filter(year==2015 & month==9) %>%
+  mutate(prediction=total_sales)%>%
+  select(-total_sales)%>%
+  right_join(test_sdf, by=c("shop_id", "year"))
+```
+
+

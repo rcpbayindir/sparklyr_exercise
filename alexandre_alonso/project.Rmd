@@ -1,0 +1,144 @@
+---
+title: "Files formats & Predicting Future Sales"
+author: "Alexandre Alonso"
+date: "July 9th 2018"
+output: pdf_document
+---
+
+## Project 1: Predict shop's future sale
+
+We want predict next month total sales of a given shop.
+
+Steps to do:
+
+1. Data preparation
+2. Train-test splitting 
+3. Training linear model
+4. Evaluating: implementing MSE & R2 
+
+
+1.
+```{r}
+library(sparklyr)
+library(dplyr)
+sc<-spark_connect(master="local")
+```
+
+
+
+```{r}
+sales_sdf <- spark_read_csv(sc, "sales", "../future_sales_data/sales_train.csv.gz")
+```
+
+```{r}
+sales_sdf %>%
+  head
+
+sales_sdf %>%
+  mutate(dt=to_timestamp(unix_timestamp(date, 'dd.MM.yyyy'))) %>%
+  mutate(year=year(dt), month=month(dt)) %>%
+  select(-dt) ->
+  sales_sdf
+
+monthly_sdf <-
+sales_sdf %>%
+  group_by(year, month,shop_id)%>%
+  summarise(total_items=sum(item_cnt_day,na.rm=TRUE)) 
+
+sdf_register(monthly_sdf, "sales_monthly")
+```
+
+```{r}
+library(DBI)
+dbGetQuery(
+  sc,
+"SELECT *
+,  LAG(total_items,3) OVER (PARTITION BY shop_id ORDER BY year, month) AS prev_total_items_3
+
+,  LAG(total_items,2) OVER (PARTITION BY shop_id ORDER BY year, month) AS prev_total_items_2
+
+,  LAG(total_items) OVER (PARTITION BY shop_id ORDER BY year, month) AS prev_total_items
+
+FROM sales_monthly") %>%
+  
+  mutate(lag1=ifelse(is.nan(prev_total_items),0,prev_total_items))%>%
+  mutate(lag2=ifelse(is.nan(prev_total_items_2),0,prev_total_items_2))%>%
+  mutate(lag3=ifelse(is.nan(prev_total_items_3),0,prev_total_items_3))%>%
+  mutate(lags=(lag1+lag2+lag3)/3)->
+  final_sdf
+
+class(final_sdf)
+
+```
+
+2.
+
+```{r}
+final_sdf<-sdf_copy_to(sc,final_sdf,"final_sdf", overwrite=TRUE)
+
+train_sdf<- final_sdf %>%
+  filter(!(year==2015 & month==10))
+
+test_sdf<- final_sdf %>%
+  filter(year==2015 & month==10)
+
+test_sdf 
+
+```
+
+```{r}
+test_sdf %>%
+  summarise(mean(total_items))
+```
+
+
+
+3.
+```{r}
+train_sdf%>%
+  ml_linear_regression(total_items ~ lag1 + lag2 + lag1:lag2 + lag2:lag3 + lag1:lag2:lag3 + year +  month + month:lag1) -> 
+  model
+
+summary(model)
+```
+
+```{r}
+(significance <- c(model$model["intercept"][[1]],model$model["coefficients"][[1]])/model$summary["coefficient_standard_errors"][[1]])
+
+round(model$summary["p_values"][[1]],5)
+```
+
+
+4. 
+
+```{r}
+train_sdf %>%
+  sdf_predict(model) %>%
+  mutate(res=log(total_items+1) - log(prediction+1))%>%
+  summarise(mean(res*res))   #implement mean(log(y+1)-log(y'+1))^2
+  print 
+
+test_sdf
+  sdf_predict(model) %>%
+  mutate(res=log(total_items+1) - log(prediction+1))%>%
+  summarise(mean(res*res))
+  print
+```
+
+
+```{r}
+train_sdf %>%
+  sdf_predict(model) %>%
+  mutate(res=log(total_items+1) - log(prediction+1))%>%
+  print->ploty
+  
+  library(ggplot2)
+  ggplot(ploty, aes(prediction, res))+
+  geom_point() +
+  geom_smooth() +
+  scale_size_area()
+```
+
+
+
+
